@@ -4,6 +4,7 @@
 
 期刊列表在 journals.json, 每条有一个 type:
   - "ajcass"   : 社科院期刊平台 (xxx.ajcass.com), 抓首页当期目录 + 文章页
+  - "magtech"  : 玛格泰克期刊系统 (.../CN/<ISSN>/home.shtml), 抓当期 + 网络首发
   - "crossref" : 用 Crossref 接口按 ISSN 取最新文章和摘要 (多数英文期刊)
 
 用法:
@@ -15,6 +16,7 @@
 某一本失败不会影响其他期刊, 也不会覆盖它原来的 feed 文件。
 """
 import argparse
+import hashlib
 import html as htmllib
 import json
 import re
@@ -72,7 +74,8 @@ LABELS = {
 }
 
 
-def extract_field(soup, text, names):
+def extract_field(soup, text, names, min_len=1):
+    """按"标签: 值"版式找字段。min_len 用来排除"摘要"这类导航按钮误匹配。"""
     clean = lambda s: re.sub(r"[\s：:]", "", s or "")
     targets = {clean(n) for n in names}
     for tag in soup.find_all(["td", "th", "span", "b", "strong", "label", "div", "dt", "p"]):
@@ -81,16 +84,16 @@ def extract_field(soup, text, names):
             sib = tag.find_next_sibling()
             if sib is not None:
                 val = norm(sib.get_text(" ", strip=True))
-                if val:
+                if len(val) >= min_len:
                     return val
         for n in names:
             m = re.match(rf"^\s*{re.escape(n)}\s*[：:]\s*(.+)$", own, re.S)
-            if m and len(tag.find_all(True)) <= 2:
+            if m and len(tag.find_all(True)) <= 2 and len(norm(m.group(1))) >= min_len:
                 return norm(m.group(1))
     stop = r"(?:关\s*键\s*词|Keywords|Abstract|英文|作者简介|基金|DOI|分类号|$)"
     for n in names:
         m = re.search(rf"{re.escape(n)}\s*[：:]\s*(.+?){stop}", text, re.S)
-        if m and norm(m.group(1)):
+        if m and len(norm(m.group(1))) >= min_len:
             return norm(m.group(1))
     return ""
 
@@ -143,6 +146,104 @@ def fetch_ajcass(cfg):
     return items
 
 
+# ---------------------------------------------------------------- magtech
+
+# 玛格泰克期刊系统 (网址形如 .../CN/1004-8804/home.shtml), 很多中文期刊在用
+MAG_ART_RE = re.compile(
+    r'href="((?:https?://[^"/]+)?/CN/(?:Y\d{4}/V\d+/I\d+/\d+|10\.\d{4,}/[^"#?]+|abstract/abstract\d+\.shtml))"',
+    re.I)
+MAG_SKIP = re.compile(r"(目录|目次|征稿|启事|稿约|勘误|更正|编后|索引)")
+
+
+def parse_date(s):
+    m = re.search(r"(\d{4})[-/年.](\d{1,2})(?:[-/月.](\d{1,2}))?", s or "")
+    if not m:
+        return None
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3) or 1)
+    try:
+        return datetime(y, mo, d, 8, 0, tzinfo=CST)
+    except ValueError:
+        return None
+
+
+def fetch_magtech(cfg):
+    home = cfg["url"]                       # .../CN/1004-8804/home.shtml
+    root = re.sub(r"/CN/.*$", "", home)     # https://www.society.shu.edu.cn
+    pages = [urljoin(home, "current.shtml")]
+    if cfg.get("online_first", True):
+        pages.append(root + "/CN/article/showAsap.do")
+    links = []
+    for p in pages:
+        try:
+            r = get(p)
+        except Exception as e:
+            log(f"  无法打开 {p}: {e}")
+            continue
+        found = [urljoin(root, h) for h in MAG_ART_RE.findall(r.text)]
+        log(f"  {p.rsplit('/', 1)[-1]}: {len(set(found))} 篇")
+        links += found
+    links = list(dict.fromkeys(links))
+
+    items, seen_titles = [], set()
+    for idx, url in enumerate(links):
+        try:
+            r = get(url)
+        except Exception as e:
+            log(f"  跳过 {url}: {e}")
+            continue
+        r.encoding = r.apparent_encoding or "utf-8"
+        soup = BeautifulSoup(r.text, "html.parser")
+        meta = {}
+        for m in soup.find_all("meta"):
+            k = (m.get("name") or m.get("property") or "").strip()
+            if k and m.get("content") and k not in meta:
+                meta[k] = m["content"].strip()
+        title = norm(meta.get("citation_title") or meta.get("DC.Title")
+                     or (soup.title.get_text() if soup.title else ""))
+        if not title or MAG_SKIP.search(title) or title in seen_titles:
+            continue
+        seen_titles.add(title)
+        text = soup.get_text("\n")
+        # 摘要: 先看 meta, 不够长再按版面找; 少于 60 字视为没找到
+        abstract = ""
+        for k in ("citation_abstract", "DC.Description", "description"):
+            v = norm(htmllib.unescape(meta.get(k, "")))
+            if len(v) >= 60 and re.search(r"[一-鿿]", v):
+                abstract = v
+                break
+        if not abstract:
+            abstract = extract_field(soup, text, ["摘要", "摘 要", "内容摘要"], min_len=60)
+        authors = norm(meta.get("citation_authors") or "") or \
+            "、".join(m["content"] for m in soup.find_all("meta", attrs={"name": "citation_author"}) if m.get("content"))
+        keywords = norm(meta.get("citation_keywords") or meta.get("DC.Keywords") or meta.get("keywords") or "").strip(",，;； ")
+        doi = norm(meta.get("citation_doi") or "")
+        m = re.search(r"/Y(\d{4})/V\d+/I(\d+)/", url)
+        where = f"{m.group(1)}年第{m.group(2)}期" if m else "网络首发"
+        date = (parse_date(meta.get("citation_online_date")) or parse_date(meta.get("citation_publication_date"))
+                or parse_date(meta.get("citation_date")) or parse_date(meta.get("DC.Date"))
+                or datetime.now(CST))
+        a = {
+            # 用标题做 guid: 网络首发文章正式刊出后换了网址, 也不会重复出现
+            "guid": f"{cfg['key']}-" + hashlib.md5(title.encode()).hexdigest()[:12],
+            "url": url,
+            "title": title,
+            "authors": authors.replace(";", "、").replace("；", "、"),
+            "abstract": abstract,
+            "keywords": keywords,
+            "doi": doi,
+            "note": f"{cfg['name']} {where}",
+            "date": date - timedelta(minutes=idx),
+        }
+        if DEBUG:
+            log(f"  [{where}] {title[:30]} | 作者={a['authors']!r} | 关键词={keywords[:30]!r}"
+                f" | 摘要{len(abstract)}字: {abstract[:30]!r}…{abstract[-15:]!r}")
+        if not abstract and cfg.get("require_abstract", True):
+            continue
+        items.append(a)
+        time.sleep(1)
+    return items
+
+
 # ---------------------------------------------------------------- crossref
 
 def jats_to_text(s):
@@ -178,12 +279,17 @@ def fetch_crossref(cfg):
     log(f"  Crossref 返回 {len(works)} 条")
 
     skip_title = re.compile(cfg.get("skip_title_regex",
-                            r"^(Erratum|Corrigendum|Correction|Editorial|Book Review|Index|Issue Information)"), re.I)
+                            r"^(Erratum|Corrigendum|Correction|Editorial|Book Review|Index|Issue Information|Front Matter|Back Matter|Contributors|Table of Contents)"), re.I)
     items = []
     for m in works:
         if m.get("type") not in (None, "journal-article"):
             continue
-        title = norm(" ".join(m.get("title") or []))
+        raw_title = " ".join(m.get("title") or [])
+        # 书评的标题是整本书名, Crossref 里通常整个包在 <i> 里
+        if cfg.get("skip_book_reviews", True) and re.match(r"^\s*<i>.*</i>\s*$", raw_title, re.S):
+            continue
+        title = norm(htmllib.unescape(re.sub(r"<[^>]+>", " ", raw_title)))
+        title = re.sub(r"\s+([,.:;?!)])", r"\1", title)
         if not title or skip_title.search(title):
             continue
         authors = ", ".join(
@@ -201,6 +307,7 @@ def fetch_crossref(cfg):
             "abstract_paras": paras,
             "abstract": " ".join(paras),
             "keywords": "",
+            "doi": m["DOI"],
             "note": f"{cfg['name']} · {where}",
             "date": cr_date(m),
         }
@@ -224,6 +331,9 @@ def item_xml(a):
     if a["keywords"]:
         desc += f"<p><b>关键词：</b>{escape(a['keywords'])}</p>"
     desc += f"<p><i>{escape(a['note'])}</i></p>"
+    if a.get("doi"):
+        d = escape(a["doi"])
+        desc += f'<p>DOI: <a href="https://doi.org/{d}">{d}</a></p>'
     return f"""    <item>
       <title>{escape(a['title'])}</title>
       <link>{escape(a['url'])}</link>
@@ -253,7 +363,7 @@ def write_feed(cfg, items):
     return out
 
 
-FETCHERS = {"ajcass": fetch_ajcass, "crossref": fetch_crossref}
+FETCHERS = {"ajcass": fetch_ajcass, "magtech": fetch_magtech, "crossref": fetch_crossref}
 
 
 def main():

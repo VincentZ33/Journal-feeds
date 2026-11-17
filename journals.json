@@ -10,10 +10,22 @@
       "url": "https://shxyj.ajcass.com/"
     },
     {
+      "key": "shehui",
+      "name": "社会",
+      "type": "magtech",
+      "url": "https://www.society.shu.edu.cn/CN/1004-8804/home.shtml"
+    },
+    {
       "key": "smr",
       "name": "Sociological Methods & Research",
       "type": "crossref",
       "issn": "0049-1241"
+    },
+    {
+      "key": "asr",
+      "name": "American Sociological Review",
+      "type": "crossref",
+      "issn": "0003-1224"
     }
   ]
 }
