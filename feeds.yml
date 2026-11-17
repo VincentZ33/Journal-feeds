@@ -1,0 +1,36 @@
+name: Build journal feeds
+
+on:
+  schedule:
+    - cron: "17 1 * * *"   # 每天北京时间 09:17
+  workflow_dispatch:        # 允许在 Actions 页面手动运行
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests beautifulsoup4
+      # 某本失败时脚本返回非零, 但仍然要提交其他成功的 feed
+      - run: python3 feeds.py || echo "FAILED=1" >> "$GITHUB_ENV"
+      - name: Commit if changed
+        run: |
+          git config user.name "feed-bot"
+          git config user.email "feed-bot@users.noreply.github.com"
+          git add docs/*.xml
+          # lastBuildDate 每次都会变, 只有文章变了才提交
+          if git diff --cached -U0 | grep -E '^[+-] ' | grep -vq 'lastBuildDate'; then
+            git commit -m "update feeds"
+            git push
+          else
+            echo "no new articles"
+          fi
+      - name: Report failures
+        if: env.FAILED == '1'
+        run: exit 1   # 让这次运行显示为红色, 方便发现问题

@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "mailto": ""
+  },
+  "journals": [
+    {
+      "key": "shxyj",
+      "name": "社会学研究",
+      "type": "ajcass",
+      "url": "https://shxyj.ajcass.com/"
+    },
+    {
+      "key": "smr",
+      "name": "Sociological Methods & Research",
+      "type": "crossref",
+      "issn": "0049-1241"
+    }
+  ]
+}
