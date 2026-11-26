@@ -16,6 +16,12 @@
       "url": "https://www.society.shu.edu.cn/CN/1004-8804/home.shtml"
     },
     {
+      "key": "shxpl",
+      "name": "社会学评论",
+      "type": "magtech",
+      "url": "http://src.ruc.edu.cn/CN/2095-5154/home.shtml"
+    },
+    {
       "key": "smr",
       "name": "Sociological Methods & Research",
       "type": "crossref",
